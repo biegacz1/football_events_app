@@ -2,8 +2,15 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use App\EventHandler;
-use App\StatisticsManager;
+use App\adapters\InMemoryEventRep;
+use App\adapters\InMemoryPublisherAdapter;
+use App\adapters\InMemoryStatisticsRep;
+use App\adapters\SimpleMessageBus;
+use App\adapters\TransactionalSrv;
+use App\application\handlers\FoulEventHandler;
+use App\application\handlers\GoalEventHandler;
+use App\application\MatchEventHandler;
+use App\domain\MatchEvent;
 
 header('Content-Type: application/json');
 
@@ -20,35 +27,64 @@ if ($method === 'POST' && $path === '/event') {
         echo json_encode(['error' => 'Invalid JSON']);
         exit;
     }
-    
-    $handler = new EventHandler(__DIR__ . '/../storage/events.txt');
-    
+
+    // todo bootstrap real implementation
+
+    // temp storages
+    $store = new InMemoryEventRep();
+    $statisticsRep = new InMemoryStatisticsRep();
+
+    // temp notification publisher
+    $publisher = new InMemoryPublisherAdapter();
+
+    $transactionalSrv = new TransactionalSrv();
+
+    // handlers
+    $foulHandler = new FoulEventHandler($store, $statisticsRep);
+    $goalHandler = new GoalEventHandler($store, $statisticsRep);
+    $consumer = new MatchEventHandler([
+        $foulHandler, $goalHandler
+    ], $publisher, $transactionalSrv);
+
+    $bus = new SimpleMessageBus([$consumer]);
+
     try {
-        $result = $handler->handleEvent($data);
+
+        $event = MatchEvent::fromArray($data, time());
+        $bus->dispatch($event);
+
         http_response_code(201);
-        echo json_encode($result);
+
+        echo json_encode([
+            'status' => 'success',
+            'message' => 'Event saved successfully',
+            'event' => $event->toArray(),
+        ]);
     } catch (Exception $e) {
         http_response_code(400);
         echo json_encode(['error' => $e->getMessage()]);
     }
 } elseif ($method === 'GET' && $path === '/statistics') {
-    $statsManager = new StatisticsManager(__DIR__ . '/../storage/statistics.txt');
-    
+
+    // todo bootstrap real implementation
+    $statisticsRep = new InMemoryStatisticsRep();
+
     $matchId = $_GET['match_id'] ?? null;
     $teamId = $_GET['team_id'] ?? null;
     
     try {
-        if ($matchId && $teamId) {
-            // Get team statistics for specific match
-            $stats = $statsManager->getTeamStatistics($matchId, $teamId);
-            echo json_encode([
+        if ($matchId) {
+            $criteria = [
                 'match_id' => $matchId,
-                'team_id' => $teamId,
-                'statistics' => $stats
-            ]);
-        } elseif ($matchId) {
-            // Get all team statistics for specific match
-            $stats = $statsManager->getMatchStatistics($matchId);
+            ];
+
+            // Get team statistics for specific match
+            if ($teamId) {
+                $criteria['team_id'] = $teamId;
+            }
+
+            $stats = $statisticsRep->findByCriteria($criteria);
+
             echo json_encode([
                 'match_id' => $matchId,
                 'statistics' => $stats
